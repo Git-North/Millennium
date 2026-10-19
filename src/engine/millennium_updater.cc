@@ -93,6 +93,12 @@ void millennium_updater::check_for_updates(const std::string& channel_override)
     logger.log("Skipping update check on Nix-based releases");
     return;
 #endif
+#ifdef __APPLE__
+    /* The installer pins the macOS runtime and find_asset() has no macOS asset, so a check could only advertise
+       a release this build cannot install. It also ran in Steam's pre-exec bootstrap image and leaked its socket. */
+    logger.log("Skipping update check on macOS: the installer pins the Millennium runtime.");
+    return;
+#endif
 
     const bool checkForUpdates = CONFIG.get({ "general", "checkForMillenniumUpdates" }, true).get<bool>();
     std::string channel = channel_override.empty() ? CONFIG.get({ "general", "millenniumUpdateChannel" }, "stable").get<std::string>() : channel_override;

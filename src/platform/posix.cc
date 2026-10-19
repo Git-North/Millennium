@@ -44,6 +44,9 @@
 
 std::unique_ptr<std::thread> g_millenniumThread;
 #include "millennium/millennium_lifecycle.h"
+#ifdef __APPLE__
+#include "millennium/exit_watchdog.h"
+#endif
 
 CONSTRUCTOR void Posix_InitializeEnvironment()
 {
@@ -94,6 +97,11 @@ extern "C" __attribute__((visibility("default"))) int StopMillennium()
 
     g_millennium.reset();
     platform::after_detach_millennium();
+
+#ifdef __APPLE__
+    /* Steam's own exit-time destructors are done; join the watchdog before the bootstrap unloads this library. */
+    exit_watchdog::get().cancel();
+#endif
 
     logger.log("Millennium unloaded successfully.");
     return 0;

@@ -44,6 +44,7 @@
 #include "millennium/backend_mgr.h"
 #include "millennium/environment.h"
 #include "millennium/http_hooks.h"
+#include "millennium/http.h"
 #include "millennium/star_parser.h"
 #include "millennium/logger.h"
 #include "millennium/plugin_webkit_store.h"
@@ -823,6 +824,7 @@ void plugin_loader::setup_child_request_handler()
                     { "error", "failed to initialize curl" }
                 };
             }
+            Http::SetCloseOnExec(curl);
 
             static constexpr size_t MAX_RESPONSE_BODY = 64u * 1024u * 1024u; /* 64 MB */
 
@@ -970,6 +972,7 @@ void plugin_loader::setup_child_request_handler()
                     { "error", "failed to initialize curl" }
                 };
             }
+            Http::SetCloseOnExec(curl);
 
             struct dl_ctx
             {

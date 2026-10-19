@@ -365,6 +365,7 @@ void socket_utils::connect_socket(std::shared_ptr<socket_utils::socket_t> socket
 #elif __APPLE__
 
 #include <thread>
+#include "millennium/exit_watchdog.h"
 #include "millennium/macos_cdp_pipe.h"
 #include "millennium/millennium_lifecycle.h"
 
@@ -409,6 +410,8 @@ void socket_utils::connect_socket(std::shared_ptr<socket_utils::socket_t> props)
             return conn->send(payload, terminating);
         });
         logger.log("[{}] CDP pipe transport connected.", props->name);
+        // chromehtml.dylib launched this Helper, so its exit-time destructors are registered by now.
+        exit_watchdog::get().register_at_exit();
 
         // Read before on_connect: initialization may synchronously wait for CDP.
         std::thread reader([conn, cdp]()

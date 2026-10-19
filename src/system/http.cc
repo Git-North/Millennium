@@ -36,8 +36,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 #include <thread>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
 
 static size_t WriteByteCallback(char* ptr, size_t size, size_t nmemb, std::string* data)
 {
@@ -80,33 +85,72 @@ static void apply_proxy(CURL* curl)
     }
 }
 
+namespace
+{
+struct curl_deleter
+{
+    void operator()(CURL* curl) const
+    {
+        curl_easy_cleanup(curl);
+    }
+};
+using curl_handle = std::unique_ptr<CURL, curl_deleter>;
+
+#ifndef _WIN32
+int set_cloexec_sockopt(void*, curl_socket_t fd, curlsocktype)
+{
+    const int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    return CURL_SOCKOPT_OK;
+}
+#endif
+
+/** Aborts an in-flight transfer once Millennium is shutting down, so no thread joined at exit waits on the network. */
+int abort_on_terminate(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+{
+    return millennium_lifecycle::get().terminate.flag.load() ? 1 : 0;
+}
+
+void apply_common_options(CURL* curl)
+{
+    Http::SetCloseOnExec(curl);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abort_on_terminate);
+}
+} // namespace
+
 namespace Http
 {
 
+void SetCloseOnExec([[maybe_unused]] CURL* curl)
+{
+#ifndef _WIN32
+    curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, set_cloexec_sockopt);
+#endif
+}
+
 std::string Get(const char* url, bool retry, const long timeout)
 {
-    CURL* curl;
-    CURLcode res;
     std::string response;
 
-    curl = curl_easy_init();
+    curl_handle curl(curl_easy_init());
     if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteByteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, MILLENNIUM_USERAGENT);
-        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
-        apply_proxy(curl);
+        curl_easy_setopt(curl.get(), CURLOPT_URL, url);
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteByteCallback);
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, MILLENNIUM_USERAGENT);
+        curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, timeout);
+        apply_common_options(curl.get());
+        apply_proxy(curl.get());
 
         while (true) {
-            res = curl_easy_perform(curl);
+            const CURLcode res = curl_easy_perform(curl.get());
             if (res == CURLE_OK) {
                 break;
             }
             if (!retry) {
-                curl_easy_cleanup(curl);
                 throw HttpError(std::string("curl GET failed: ") + curl_easy_strerror(res));
             }
             if (millennium_lifecycle::get().terminate.flag.load()) {
@@ -114,33 +158,30 @@ std::string Get(const char* url, bool retry, const long timeout)
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         }
-        curl_easy_cleanup(curl);
     }
     return response;
 }
 
 std::string Post(const char* url, const std::string& postData, bool retry)
 {
-    CURL* curl;
-    CURLcode res;
     std::string response;
 
-    curl = curl_easy_init();
+    curl_handle curl(curl_easy_init());
     if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postData.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, postData.size());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteByteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, MILLENNIUM_USERAGENT);
-        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-        apply_proxy(curl);
+        curl_easy_setopt(curl.get(), CURLOPT_URL, url);
+        curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
+        curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, postData.c_str());
+        curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE, postData.size());
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteByteCallback);
+        curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, MILLENNIUM_USERAGENT);
+        curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 30L);
+        apply_common_options(curl.get());
+        apply_proxy(curl.get());
 
         while (true) {
-            res = curl_easy_perform(curl);
+            const CURLcode res = curl_easy_perform(curl.get());
             if (!retry || res == CURLE_OK) {
                 break;
             }
@@ -150,7 +191,6 @@ std::string Post(const char* url, const std::string& postData, bool retry)
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         }
-        curl_easy_cleanup(curl);
     }
     return response;
 }
@@ -161,6 +201,11 @@ void DownloadWithProgress(const std::tuple<std::string, size_t>& download_info, 
 
     CURL* curl = curl_easy_init();
     if (!curl) throw std::runtime_error("Failed to initialize curl");
+    apply_common_options(curl);
+    /* No overall timeout for large files, but a stalled connection must not block forever. */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
 
     FILE* fp = fopen(destPath.string().c_str(), "wb");
     if (!fp) {

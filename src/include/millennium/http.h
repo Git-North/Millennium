@@ -55,6 +55,8 @@ class HttpError : public std::runtime_error
 
 namespace Http
 {
+/** Keeps libcurl's sockets out of exec'd images and child processes; curl never sets FD_CLOEXEC itself. */
+void SetCloseOnExec(CURL* curl);
 std::string Get(const char* url, bool retry = true, const long timeout = 10L);
 std::string Post(const char* url, const std::string& postData, bool retry = true);
 void DownloadWithProgress(const std::tuple<std::string, size_t>& download_info, const std::filesystem::path& destPath, std::function<void(size_t, size_t)> progressCallback);
