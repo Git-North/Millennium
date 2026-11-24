@@ -1,6 +1,6 @@
 # Builds starlight (the .star packer) for Apple Silicon macOS. The npm package ships Linux x64 and Windows x64 only.
 #
-# Cost: this repository is public, so standard GitHub-hosted runners (macos-14 included) and artifact storage are free.
+# Cost: this repository is public, so standard GitHub-hosted runners (macos-15 included) and artifact storage are free.
 # Do not switch to a "-large"/"-xlarge" runner: those are billed even on public repositories.
 name: Starlight (macOS arm64)
 
@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
