@@ -1,0 +1,18 @@
+
+# MILLENNIUM_EXTRA_INSERT_LIBRARIES support, implemented in Rust (extra_inject/src/lib.rs) and linked into the launcher
+# and the bootstrap library. Corrosion may already have been fetched by another directory.
+if(NOT COMMAND corrosion_import_crate)
+    get_filename_component(MILLENNIUM_EXTRA_INJECT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+    file(GLOB MILLENNIUM_EXTRA_INJECT_CORROSION "${MILLENNIUM_EXTRA_INJECT_ROOT}/thirdparty/corrosion-*.tar.gz")
+    include(FetchContent)
+    FetchContent_Declare(Corrosion URL "${MILLENNIUM_EXTRA_INJECT_CORROSION}" DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(Corrosion)
+endif()
+
+corrosion_import_crate(
+    MANIFEST_PATH "${CMAKE_CURRENT_LIST_DIR}/extra_inject/Cargo.toml"
+    CRATE_TYPES   staticlib
+)
+
+target_link_libraries(macos-bootstrap PRIVATE millennium_extra_inject)
+target_link_libraries(SteamWrapper PRIVATE millennium_extra_inject)

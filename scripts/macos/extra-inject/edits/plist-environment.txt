@@ -1,0 +1,5 @@
+    <key>LSEnvironment</key>
+    <dict>
+        <key>MILLENNIUM_EXTRA_INSERT_LIBRARIES</key>
+        <string>@LIBRARIES@</string>
+    </dict>

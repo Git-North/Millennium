@@ -1,0 +1,14 @@
+    // An injected library can take DYLD_INSERT_LIBRARIES out of the environment and restore it from its own execve
+    // hook. Without the variable, call through libc so that hook runs; the raw syscall below would skip it.
+    char* const* exec_environment = envp ? envp : environ;
+    bool has_insert = false;
+    for (size_t index = 0; exec_environment && exec_environment[index]; ++index) {
+        if (strncmp(exec_environment[index], "DYLD_INSERT_LIBRARIES=", 22) == 0) {
+            has_insert = true;
+            break;
+        }
+    }
+    if (!has_insert) {
+        return execve(path, argv, exec_environment);
+    }
+

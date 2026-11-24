@@ -1,0 +1,11 @@
+
+#ifdef __APPLE__
+// Implemented in Rust (extra_inject/): adds the libraries from MILLENNIUM_EXTRA_INSERT_LIBRARIES to this process's
+// DYLD_INSERT_LIBRARIES. This runs before main, so merge_injected_libraries() keeps them next to its own library.
+extern "C" void millennium_extra_inject_prepare_environment(void);
+
+__attribute__((constructor)) static void prepare_extra_injected_libraries()
+{
+    millennium_extra_inject_prepare_environment();
+}
+#endif

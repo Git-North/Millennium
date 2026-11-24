@@ -1,0 +1,4 @@
+// Implemented in Rust (extra_inject/): appends the libraries from MILLENNIUM_EXTRA_INSERT_LIBRARIES to a
+// DYLD_INSERT_LIBRARIES value. The result is never null and stays valid until the next call on the same thread.
+extern "C" const char* millennium_extra_inject_append(const char* dyld_insert_libraries, bool warn_on_unreadable);
+

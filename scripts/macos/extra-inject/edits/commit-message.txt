@@ -1,0 +1,17 @@
+feat(macos): add MILLENNIUM_EXTRA_INSERT_LIBRARIES to run other DYLD_INSERT_LIBRARIES mods next to Millennium
+
+Another DYLD_INSERT_LIBRARIES-based Steam mod cannot be combined with Millennium by exporting the variable. A mod that
+removes DYLD_INSERT_LIBRARIES from its own environment on load (to keep it out of child processes) leaves nothing for
+the launcher to merge, and the execve interposer rebuilds the variable from the environment it is handed, so the mod's
+library silently drops out when Steam re-executes itself.
+
+MILLENNIUM_EXTRA_INSERT_LIBRARIES is a ':'-separated list of dylib paths. The launcher adds it to DYLD_INSERT_LIBRARIES
+and the bootstrap keeps it when Steam re-executes itself. Unreadable entries are skipped, because dyld terminates a
+process whose inserted dylib cannot be loaded. The logic lives in a small Rust crate (extra_inject) that is linked into
+both the launcher and the bootstrap library.
+
+The wrapper app's Info.plist template sets the variable (to Proton-ish's dylib unless told otherwise), so an installed
+bundle needs no manual setup. A listed path that does not exist is skipped with a warning.
+
+When the browser is started without DYLD_INSERT_LIBRARIES in its environment, call execve through libc instead of the
+raw syscall, so a library that took the variable out can restore it from its own execve hook.
