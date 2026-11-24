@@ -1,0 +1,44 @@
+# Builds starlight (the .star packer) for Apple Silicon macOS. The npm package ships Linux x64 and Windows x64 only.
+#
+# Cost: this repository is public, so standard GitHub-hosted runners (macos-14 included) and artifact storage are free.
+# Do not switch to a "-large"/"-xlarge" runner: those are billed even on public repositories.
+name: Starlight (macOS arm64)
+
+on:
+  push:
+    branches: [starlight-macos]
+    paths:
+      - "starlight/**"
+      - ".github/workflows/starlight-macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: starlight-macos
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build
+        run: cargo build --release --locked --target aarch64-apple-darwin
+        working-directory: starlight
+
+      - name: Smoke test
+        run: starlight/target/aarch64-apple-darwin/release/starlight --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: starlight-darwin-arm64
+          path: starlight/target/aarch64-apple-darwin/release/starlight
+          retention-days: 7
