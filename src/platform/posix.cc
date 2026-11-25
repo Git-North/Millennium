@@ -86,9 +86,14 @@ extern "C" __attribute__((visibility("default"))) int StartMillennium()
     return 0;
 }
 
-extern "C" __attribute__((visibility("default"))) int StopMillennium()
+/** Stops the runtime thread (plugin backends, frontend, MEP server) and destroys Millennium. Safe to call twice. */
+static void Posix_DetachMillennium()
 {
-    logger.log("Unloading Millennium...");
+    /* exit() reached from the runtime thread itself (the SIGINT handler): it cannot join itself. */
+    if (g_millenniumThread && g_millenniumThread->get_id() == std::this_thread::get_id()) {
+        return;
+    }
+
     millennium_lifecycle::get().terminate.notify();
 
     if (g_millenniumThread && g_millenniumThread->joinable()) {
@@ -96,6 +101,31 @@ extern "C" __attribute__((visibility("default"))) int StopMillennium()
     }
 
     g_millennium.reset();
+}
+
+#ifdef __APPLE__
+/**
+ * Called by the macOS bootstrap's exit() interposer, before exit() runs any atexit handler or static destructor.
+ *
+ * StopMillennium runs from bootstrap_cleanup, an atexit handler registered right after this library was loaded, so
+ * exit() first runs every handler registered later: Steam's static destructors and the destructor of every
+ * function-local static of this library first used after startup (get_plugin_logger_mgr(), get_steam_path(), ...).
+ * Millennium's threads keep running meanwhile, and the teardown (plugin SHUTDOWN RPCs, backend log lines, reader
+ * threads) then uses freed memory. The heap corruption shows up as SIGSEGV in mfm_free (from ~PluginProcess or a
+ * thread's TSD cleanup) or as std::thread::join throwing in backend_manager::shutdown. Stopping here avoids it.
+ */
+extern "C" __attribute__((visibility("default"))) int MillenniumBeforeExit()
+{
+    logger.log("Steam is exiting; stopping Millennium before static destructors run...");
+    Posix_DetachMillennium();
+    return 0;
+}
+#endif
+
+extern "C" __attribute__((visibility("default"))) int StopMillennium()
+{
+    logger.log("Unloading Millennium...");
+    Posix_DetachMillennium();
     platform::after_detach_millennium();
 
 #ifdef __APPLE__
