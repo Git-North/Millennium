@@ -1,6 +1,8 @@
 #ifdef __APPLE__
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <libgen.h>
+#include <os/lock.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <stdio.h>
@@ -415,6 +417,37 @@ static int millennium_execv(const char* path, char* const argv[])
 
 DYLD_INTERPOSE(millennium_execv, execv);
 
+// StartMillennium creates the runtime thread, which immediately binds sockets, spawns plugin
+// processes and starts thread pools. It must not run while dyld is still running initializers:
+// other inserted libraries (Proton-ish's protonish.dylib, loaded after this one) patch
+// libsystem_kernel's __TEXT from their initializers by making the page writable, and any other
+// thread that executes a syscall stub on that page meanwhile dies with SIGBUS
+// (KERN_PROTECTION_FAILURE). Initializers run single-threaded on the main thread before main(),
+// and the main queue is only drained once main() runs the run loop, so starting from the main
+// queue keeps the process single-threaded until every initializer has returned. libmillennium
+// already relies on Steam draining the main queue (macos_window_style.mm). The callback lives in
+// this library, which is never unloaded, and bootstrap_cleanup cancels it if Steam exits first.
+static start_millennium_t g_start_millennium = nullptr;
+static bool g_start_pending = false;
+static os_unfair_lock g_start_lock = OS_UNFAIR_LOCK_INIT;
+
+static void start_millennium_after_initializers(void*)
+{
+    os_unfair_lock_lock(&g_start_lock);
+    const bool pending = g_start_pending;
+    g_start_pending = false;
+    if (pending) {
+        append_trace("bootstrap-start-runtime");
+        if (g_start_millennium() < 0) {
+            fprintf(stderr, "[Millennium] Failed to start runtime.\n");
+            dlclose(g_millennium_handle);
+            g_millennium_handle = nullptr;
+            millennium_pipe_bootstrap::shutdown();
+        }
+    }
+    os_unfair_lock_unlock(&g_start_lock);
+}
+
 __attribute__((constructor)) static void bootstrap_init()
 {
     if (!is_steam_main_process()) {
@@ -445,21 +478,31 @@ __attribute__((constructor)) static void bootstrap_init()
         return;
     }
 
-    if (!millennium_pipe_bootstrap::initialize(g_millennium_handle) || start_millennium() < 0) {
+    if (!millennium_pipe_bootstrap::initialize(g_millennium_handle)) {
         fprintf(stderr, "[Millennium] Failed to start runtime.\n");
         dlclose(g_millennium_handle);
         g_millennium_handle = nullptr;
         millennium_pipe_bootstrap::shutdown();
+        return;
     }
+
+    g_start_millennium = start_millennium;
+    g_start_pending = true;
+    dispatch_async_f(dispatch_get_main_queue(), nullptr, start_millennium_after_initializers);
 }
 
 __attribute__((destructor)) static void bootstrap_cleanup()
 {
+    os_unfair_lock_lock(&g_start_lock);
+    const bool never_started = g_start_pending;
+    g_start_pending = false;
+    os_unfair_lock_unlock(&g_start_lock);
+
     if (!g_millennium_handle) {
         return;
     }
 
-    stop_millennium_t stop_millennium = (stop_millennium_t)dlsym(g_millennium_handle, "StopMillennium");
+    stop_millennium_t stop_millennium = never_started ? nullptr : (stop_millennium_t)dlsym(g_millennium_handle, "StopMillennium");
     if (stop_millennium) {
         stop_millennium();
     }
