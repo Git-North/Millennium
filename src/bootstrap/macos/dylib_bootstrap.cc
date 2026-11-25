@@ -11,6 +11,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include "pipe_bootstrap.h"
@@ -429,6 +430,7 @@ DYLD_INTERPOSE(millennium_execv, execv);
 // this library, which is never unloaded, and bootstrap_cleanup cancels it if Steam exits first.
 static start_millennium_t g_start_millennium = nullptr;
 static bool g_start_pending = false;
+static bool g_runtime_started = false;
 static os_unfair_lock g_start_lock = OS_UNFAIR_LOCK_INIT;
 
 static void start_millennium_after_initializers(void*)
@@ -443,10 +445,44 @@ static void start_millennium_after_initializers(void*)
             dlclose(g_millennium_handle);
             g_millennium_handle = nullptr;
             millennium_pipe_bootstrap::shutdown();
+        } else {
+            g_runtime_started = true;
         }
     }
     os_unfair_lock_unlock(&g_start_lock);
 }
+
+// Steam quits through exit(), whether main() returns, AppKit terminates, or Steam calls it
+// itself. bootstrap_cleanup -> StopMillennium only runs once exit() has already run every
+// atexit handler registered after this library's: Steam's static destructors and the
+// function-local statics libmillennium creates while running. Millennium's threads keep using
+// those during that time, and its teardown frees and logs through them afterwards, which
+// corrupts the heap (SIGSEGV in mfm_free, or std::thread::join throwing during backend
+// shutdown). So stop the runtime here, before exit() destroys anything, and leave only the
+// final step (cancelling the exit watchdog) to StopMillennium. Calls to exit() from inside
+// this library are not interposed, so the exit() below is the real one.
+typedef int (*before_exit_millennium_t)(void);
+
+static void millennium_exit(int status)
+{
+    static std::atomic<bool> stopping{ false };
+
+    os_unfair_lock_lock(&g_start_lock);
+    const bool started = g_runtime_started && g_millennium_handle;
+    os_unfair_lock_unlock(&g_start_lock);
+
+    if (started && !stopping.exchange(true)) {
+        auto before_exit = (before_exit_millennium_t)dlsym(g_millennium_handle, "MillenniumBeforeExit");
+        if (before_exit) {
+            append_trace("bootstrap-before-exit");
+            before_exit();
+        }
+    }
+
+    exit(status);
+}
+
+DYLD_INTERPOSE(millennium_exit, exit);
 
 __attribute__((constructor)) static void bootstrap_init()
 {
