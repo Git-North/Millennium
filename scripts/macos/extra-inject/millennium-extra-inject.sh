@@ -345,8 +345,11 @@ cmd_install() {
     ! steam_running || die "quit Steam first"
     backup="$HOME/millennium-runtime-backup-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$backup" && cp -R "$RUNTIME/current/." "$backup/"
+    # rsync (openrsync ships with macOS) writes each file to a temporary name and renames it, so it gets a new inode.
+    # cp would overwrite the signed binary in place, and the kernel can then kill Steam at launch with "Code Signature
+    # Invalid" because it still holds the old file's signature for that inode. -I copies even when size and time match.
     for f in $FILES; do
-        cp "$from/$f" "$RUNTIME/current/$f"
+        rsync -a -I "$from/$f" "$RUNTIME/current/$f" || die "could not copy $f into $RUNTIME/current"
         xattr -d com.apple.quarantine "$RUNTIME/current/$f" 2> /dev/null || true
     done
     echo "installed the files from $from into $RUNTIME/current"
@@ -358,7 +361,7 @@ cmd_restore() {
     latest=$(find "$HOME" -maxdepth 1 -name 'millennium-runtime-backup-*' 2> /dev/null | sort | tail -n 1)
     [ -n "$latest" ] || die "no backup found in $HOME"
     ! steam_running || die "quit Steam first"
-    cp -R "$latest/." "$RUNTIME/current/"
+    rsync -a -I "$latest/" "$RUNTIME/current/" || die "could not restore $latest"   # new inodes, see cmd_install
     echo "restored $latest"
 }
 
