@@ -19,6 +19,7 @@ set -euo pipefail
 export GH_REPO
 release_tag="${RELEASE_TAG:-latest-build}"
 dry_run="${DRY_RUN:-0}"
+retry_delay="${RETRY_DELAY:-5}" # seconds between tries of a GitHub request
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -36,7 +37,7 @@ check_version() {
 
 # Runs a command that changes GitHub, or only prints it in a dry run.
 change() {
-    if [ "$dry_run" = 1 ]; then
+    if [[ "$dry_run" = 1 ]]; then
         printf 'dry run, would run:'
         printf ' %q' "$@"
         echo
@@ -45,14 +46,19 @@ change() {
     fi
 }
 
-# GitHub API GET into $answer. Returns 1 only when GitHub says the thing does not exist. Any other failure ends the
-# script: taking a network or rate limit error for "does not exist" could lose a release. Do not call it in $(...),
+# GitHub API GET into $answer. Returns 1 only when GitHub says the thing does not exist. Any other failure is tried
+# again, so that one passing error does not stop the run after the release has moved. If it keeps failing, the script
+# ends: taking a network or rate limit error for "does not exist" could lose a release. Do not call it in $(...),
 # where ending the script would only end the subshell.
 answer=""
 lookup() {
-    if answer=$(gh api "$@" 2> "$work/error"); then return 0; fi
-    if grep -q 'HTTP 404' "$work/error"; then return 1; fi
-    cat "$work/error" >&2
+    local attempt
+    for attempt in 1 2 3; do
+        if answer=$(gh api "$@" 2> "$work/error"); then return 0; fi
+        if grep -q 'HTTP 404' "$work/error"; then return 1; fi
+        cat "$work/error" >&2
+        if [[ "$attempt" -lt 3 ]]; then sleep "$retry_delay"; fi
+    done
     die "gh api $1 failed"
 }
 
@@ -60,7 +66,7 @@ lookup() {
 tag_commit() {
     lookup "repos/$GH_REPO/git/ref/tags/$1" --jq '.object.type + " " + .object.sha' || return 1
     local type="${answer% *}" object="${answer#* }"
-    if [ "$type" = tag ]; then # an annotated tag points to a tag object, which points to the commit
+    if [[ "$type" = tag ]]; then # an annotated tag points to a tag object, which points to the commit
         lookup "repos/$GH_REPO/git/tags/$object" --jq .object.sha || die "cannot read the tag object of $1"
     else
         answer="$object"
@@ -73,9 +79,24 @@ create_tag() {
 
 # A tag that outlives its release must go: "gh release create" would reuse it, at the old commit.
 delete_release_tag() {
-    if tag_commit "$release_tag"; then
-        change gh api --silent --method DELETE "repos/$GH_REPO/git/refs/tags/$release_tag"
-    fi
+    local attempt
+    for attempt in 1 2 3; do
+        tag_commit "$release_tag" || return 0 # gone, perhaps through an earlier try whose answer got lost
+        if change gh api --silent --method DELETE "repos/$GH_REPO/git/refs/tags/$release_tag"; then return 0; fi
+        if [[ "$attempt" -lt 3 ]]; then sleep "$retry_delay"; fi
+    done
+    die "cannot delete the tag $release_tag"
+}
+
+# Whether the release at tag $1 has a bundle.
+has_bundle() {
+    lookup "repos/$GH_REPO/releases/tags/$1" --jq '.assets[].name' || return 1
+    grep -q '\.tar\.gz$' <<< "$answer"
+}
+
+# Release notes from stdin, without their BitTorrent section.
+without_bittorrent() {
+    tr -d '\r' | awk '/^\*\*.*\*\*$/ { skip = ($0 == "**Download with BitTorrent**") } !skip'
 }
 
 if ! lookup "repos/$GH_REPO/releases/tags/$release_tag" --jq .target_commitish; then
@@ -98,11 +119,11 @@ new_version="${NEW_VERSION:-$(parse_version < "$(dirname "$0")/../../version")}"
 check_version "$new_version" "the new build"
 kept="v${old_version}-extra.${sha:0:7}"
 
-if [ "$old_version" = "$new_version" ]; then
+if [[ "$old_version" = "$new_version" ]]; then
     echo "same version $old_version: tag $kept, replace $release_tag"
     if ! tag_commit "$kept"; then
         create_tag "$kept" "$sha"
-    elif [ "$answer" = "$sha" ]; then
+    elif [[ "$answer" = "$sha" ]]; then
         echo "the tag $kept already exists; skipping"
     else
         echo "::warning::the tag $kept already exists at $answer, not at $sha; leaving it as it is"
@@ -112,6 +133,11 @@ fi
 
 echo "different version ($old_version, the new build is $new_version): keep the release as $kept, replace $release_tag"
 if lookup "repos/$GH_REPO/releases/tags/$kept" --jq .tag_name; then
+    # The workflow deletes the old release next, so make sure this one really keeps it.
+    if ! tag_commit "$kept" || [[ "$answer" != "$sha" ]]; then
+        die "the release $kept exists, but its tag is not on $sha, so it does not keep this build"
+    fi
+    has_bundle "$kept" || die "the release $kept exists, but has no bundle, so it does not keep this build"
     echo "the release $kept already exists; skipping"
     exit 0
 fi
@@ -119,12 +145,17 @@ fi
 # The tag first, so the release can only end up on the right commit.
 if ! tag_commit "$kept"; then
     create_tag "$kept" "$sha"
-elif [ "$answer" != "$sha" ]; then
+elif [[ "$answer" != "$sha" ]]; then
     # Going on would delete the release without having kept it.
     die "the tag $kept exists at $answer, not at $sha, so the release cannot be kept under that name"
 fi
 
-# The torrents go before the move: if the run stops in between, the next one finds the release still in place.
+# The torrents go before the move: if the run stops in between, the next one finds the release still in place. Their
+# part of the notes goes first, so the notes never offer a download that is gone.
+lookup "repos/$GH_REPO/releases/tags/$release_tag" --jq '.body // ""' || die "the $release_tag release is gone"
+without_bittorrent <<< "$answer" > "$work/stripped.md"
+change gh release edit "$release_tag" --notes-file "$work/stripped.md"
+
 lookup "repos/$GH_REPO/releases/tags/$release_tag" --jq '.assets[].name' || die "the $release_tag release is gone"
 while IFS= read -r asset; do
     case "$asset" in
@@ -132,18 +163,15 @@ while IFS= read -r asset; do
     esac
 done <<< "$answer"
 
-# The old notes without their BitTorrent section, with the manual fetch command pointed at this release.
-lookup "repos/$GH_REPO/releases/tags/$release_tag" --jq '.body // ""' || die "the $release_tag release is gone"
+# The kept release's notes: the stripped ones, marked as older, with the manual fetch command pointed at this release.
 notes="$work/notes.md"
 {
     # shellcheck disable=SC2016 # the backticks are Markdown
     printf '**This is an older Millennium version (%s).** Homebrew installs the current `latest-build` release, not this one.\n\n' \
         "$old_version"
-    tr -d '\r' <<< "$answer" |
-        awk '/^\*\*.*\*\*$/ { skip = ($0 == "**Download with BitTorrent**") } !skip' |
-        sed "s|\(millennium-extra-inject\.sh fetch $GH_REPO\)\$|\1 $kept|"
+    sed "s|\(millennium-extra-inject\.sh fetch $GH_REPO\)\$|\1 $kept|" "$work/stripped.md"
 } > "$notes"
-if [ "$dry_run" = 1 ]; then
+if [[ "$dry_run" = 1 ]]; then
     echo "--- new notes ---"
     cat "$notes"
     echo "--- end of notes ---"
@@ -152,9 +180,8 @@ fi
 change gh release edit "$release_tag" --tag "$kept" --target "$sha" \
     --title "Millennium $old_version (older version, build ${sha:0:7})" --notes-file "$notes" --latest=false
 
-if [ "$dry_run" != 1 ]; then
-    lookup "repos/$GH_REPO/releases/tags/$kept" --jq '.assets[].name' || die "there is no release at $kept after the move"
-    grep -q '\.tar\.gz$' <<< "$answer" || die "the release at $kept has no bundle after the move"
+if [[ "$dry_run" != 1 ]]; then
+    has_bundle "$kept" || die "there is no release with a bundle at $kept after the move"
 fi
 
 delete_release_tag
