@@ -1,5 +1,6 @@
 set(TEST_SOURCES
   ffi_recorder_test.cc
+  test_encoding.cc
   test_target_url.cc
   test_sdk_ready.cc
   ${CMAKE_SOURCE_DIR}/src/mep/ffi_recorder.cc
@@ -44,6 +45,18 @@ if(APPLE AND MILLENNIUM_BUILD_MAIN)
     add_test(NAME "${test_name}" COMMAND millennium_macos_connector_tests "${test_name}")
     set_tests_properties("${test_name}" PROPERTIES TIMEOUT 15)
   endforeach()
+endif()
+
+add_subdirectory(cdp_shutdown)
+
+if(UNIX)
+  add_subdirectory(posix_lifecycle)
+  add_subdirectory(logger_concurrency)
+  add_subdirectory(child_shutdown)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (MILLENNIUM_LINUX_X64 OR MILLENNIUM_NIX_64BIT))
+  add_subdirectory(linux_rt3)
 endif()
 
 add_executable(sdk_health sdk_health.cc)
