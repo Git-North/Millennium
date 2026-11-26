@@ -188,6 +188,14 @@ jobs:
           magnet+="&ws=$(jq -rn --arg v "$base/$asset" '$v | @uri')"
           echo "magnet=${magnet}" >> "$GITHUB_OUTPUT"
 
+      # Kept with the run, so the torrents can be checked on a branch that does not publish a release.
+      - name: Upload the torrents
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.bundle.outputs.name }}-torrents
+          path: ${{ runner.temp }}/dist/*.torrent
+          if-no-files-found: error
+
       - name: Publish the release
         if: github.ref_name == github.event.repository.default_branch
         shell: bash
