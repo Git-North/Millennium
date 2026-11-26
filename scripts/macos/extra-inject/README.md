@@ -33,6 +33,22 @@ It downloads the bundle and prints the install command (upstream's own installer
 `Steam Millennium.app`. `sh scripts/macos/extra-inject/millennium-extra-inject.sh status` tells whether the installed
 runtime has the change.
 
+## Earlier builds
+
+`latest-build` is always the newest build. Before the workflow replaces it, `keep-previous-release.sh` looks at the
+build that is there:
+
+- Based on another Millennium version (`scripts/version`) than the new one: its release is kept and moves to the tag
+  `v<version>-extra.<commit>`, without its .torrent files. To download it, add that tag to the `fetch` command above.
+- Based on the same version: its release is replaced. A tag of the same form stays on its commit, so you can find or
+  rebuild its source.
+
+To see what it would do now, without changing anything:
+
+```sh
+DRY_RUN=1 GH_REPO=YOU/YOUR-FORK bash scripts/macos/extra-inject/keep-previous-release.sh
+```
+
 ## Cost
 
 Nothing, for a fork. A fork of a public repository is public, and GitHub's standard macOS runner is free and unlimited for
