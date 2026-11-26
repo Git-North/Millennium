@@ -14,12 +14,15 @@ name: SonarQube
 #   (import it through GitHub), Automatic Analysis is off for that project (Administration > Analysis Method), and an
 #   organization admin has turned on Administration > Organization settings > Analysis > "Enable secretless analysis for
 #   GitHub Actions". The organization and project key come from that binding.
-#   GitHub gives pull requests from forks no OIDC token, so those are skipped with a notice.
+#   GitHub gives pull requests from forks no OIDC token, so the job fails for those (see below).
 # - A self-hosted SonarQube Server has no OIDC exchange. Set the repository variable SONAR_HOST_URL to its URL, and the
 #   repository secret SONAR_TOKEN to a token with Execute Analysis permission; SONAR_PROJECT_KEY optionally overrides
-#   the project key (Git-North_Millennium). Without SONAR_TOKEN the job is skipped with a notice.
+#   the project key (Git-North_Millennium). Without SONAR_TOKEN the job fails with an error.
 # - SONAR_RUNNER (repository variable, optional) sets the runner labels as JSON, e.g. ["self-hosted","macOS","ARM64"];
-#   unset means macos-15.
+#   unset means macos-15. It applies to pushes and manual runs only: pull requests always use GitHub's macos-15 runner,
+#   so PR-controlled build code never runs on a persistent self-hosted machine.
+# - When the analysis cannot run (a fork PR in Cloud mode, or Server mode without SONAR_TOKEN) the job fails instead of
+#   passing, so a required check never turns green without a quality-gate result.
 
 on:
   push:
@@ -45,7 +48,7 @@ env:
 jobs:
   analysis:
     # Same runner as the bundle workflow: Xcode on macos-14 ships a libc++ too old for this tree.
-    runs-on: ${{ fromJSON(vars.SONAR_RUNNER || '"macos-15"') }}
+    runs-on: ${{ fromJSON(github.event_name != 'pull_request' && vars.SONAR_RUNNER || '"macos-15"') }}
     timeout-minutes: 90
     steps:
       - name: Choose SonarQube Cloud or Server
@@ -61,19 +64,21 @@ jobs:
           if [ -z "$SERVER_URL" ]; then
             mode=cloud
             if [ "$FORK_PR" = "true" ]; then
-              echo "::notice::Pull requests from forks get no OIDC token, so secretless SonarQube Cloud analysis is skipped."
+              echo "::error::Pull requests from forks get no OIDC token, so secretless SonarQube Cloud analysis cannot run. Review the PR manually."
               run=false
             fi
           else
             mode=server
             if [ "$HAS_SERVER_TOKEN" != "true" ]; then
-              echo "::notice::SONAR_HOST_URL is set but the SONAR_TOKEN secret is not available (not set, or a pull request from a fork), so the analysis is skipped."
+              echo "::error::SONAR_HOST_URL is set but the SONAR_TOKEN secret is not available (not set, or a pull request from a fork), so the analysis cannot run."
               run=false
             fi
           fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "SonarQube $mode, analysis runs: $run"
+          # Fail rather than pass without a quality-gate result.
+          [ "$run" = "true" ] || exit 1
 
       - name: Checkout
         if: steps.mode.outputs.run == 'true'
@@ -167,6 +172,9 @@ jobs:
       - name: SonarQube Cloud scan
         if: steps.mode.outputs.run == 'true' && steps.mode.outputs.mode == 'cloud'
         uses: SonarSource/sonarqube-scan-action@v8.5.1
+        env:
+          # The auth action also exports it to the environment; passing the output keeps the dependency explicit.
+          SONAR_TOKEN: ${{ steps.auth.outputs.sonar-token }}
         with:
           args: >
             -Dsonar.organization=${{ steps.auth.outputs.organization }}
