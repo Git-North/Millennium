@@ -4,6 +4,8 @@ name: extra-inject bundle
 # repository's default branch changes, for example when you sync it with upstream, and publishes it as the release
 # "latest-build". The build is upstream's own (scripts/macos/lbk/build.sh and bundle.sh). The only difference is that the
 # extra-inject change is added to this run's checkout first, so the branch stays free of it and syncing never conflicts.
+# Before "latest-build" is replaced, scripts/macos/extra-inject/keep-previous-release.sh keeps the build that is there:
+# as a release of its own if it is based on another Millennium version, otherwise only as a git tag on its commit.
 # It needs no secrets: the bundle is ad-hoc signed, as upstream's build is without a signing certificate.
 # It runs on GitHub's standard macOS runner, which is free for a public repository (a fork of a public repository is
 # public). To use your own Mac instead, for a private repository, set the repository variable EXTRA_INJECT_RUNNER to
@@ -100,6 +102,7 @@ jobs:
         run: |
           upstream="$(grep -v '^#' scripts/version | tr -d '[:space:]' | sed 's/^v//')"
           version="${upstream}-extra.${GITHUB_SHA::7}"
+          echo "upstream=${upstream}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Upstream ${upstream}, build ${version}"
 
@@ -204,6 +207,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           NAME: ${{ steps.bundle.outputs.name }}
           MAGNET: ${{ steps.torrents.outputs.magnet }}
+          NEW_VERSION: ${{ steps.version.outputs.upstream }}
         run: |
           dist="${RUNNER_TEMP}/dist"
           cat > notes.md <<EOF
@@ -261,9 +265,11 @@ jobs:
           ${MAGNET}
           \`\`\`
           EOF
+          # Keeps the build that is about to be replaced. If this fails, the step stops here and that release stays.
+          bash "$KIT/keep-previous-release.sh"
           gh release delete latest-build --cleanup-tag --yes > /dev/null 2>&1 || true
           gh release create latest-build \
             "$dist/${NAME}.tar.gz" "$dist/${NAME}.tar.gz.sha256" "$dist/millennium-darwin-arm64.tar.gz" \
             "$dist/${NAME}.tar.gz.torrent" "$dist/${NAME}.tar.gz.sha256.torrent" \
             "$dist/millennium-darwin-arm64.tar.gz.torrent" \
-            --target "$GITHUB_SHA" --title "Build of ${NAME}" --notes-file notes.md
+            --target "$GITHUB_SHA" --title "Build of ${NAME}" --notes-file notes.md --latest
