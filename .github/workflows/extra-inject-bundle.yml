@@ -139,6 +139,52 @@ jobs:
             ${{ runner.temp }}/dist/${{ steps.bundle.outputs.name }}.tar.gz.sha256
           if-no-files-found: error
 
+      # One .torrent per release asset. Each has the asset's GitHub download URL as a web seed (BEP 19, "url-list"), so a
+      # client can download it when there are no peers. They are not marked private, so DHT and peer exchange work. A
+      # torrent matches only its own build: the next release replaces what those URLs serve.
+      - name: Create the torrents
+        id: torrents
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          NAME: ${{ steps.bundle.outputs.name }}
+        run: |
+          command -v mktorrent > /dev/null || brew install mktorrent
+          command -v aria2c > /dev/null || brew install aria2
+          dist="${RUNNER_TEMP}/dist"
+          base="https://github.com/${GH_REPO}/releases/download/latest-build"
+          trackers=(
+            udp://tracker.opentrackr.org:1337/announce
+            udp://open.stealth.si:80/announce
+            udp://tracker.torrent.eu.org:451/announce
+          )
+          announce=()
+          for t in "${trackers[@]}"; do announce+=(-a "$t"); done
+          for asset in "${NAME}.tar.gz" "${NAME}.tar.gz.sha256" millennium-darwin-arm64.tar.gz; do
+            torrent="$dist/${asset}.torrent"
+            rm -f "$torrent"
+            # -l 16 means 64 KiB pieces: about 100 for a bundle of a little over 6 MB.
+            mktorrent -l 16 "${announce[@]}" -w "$base/$asset" -c "$GITHUB_SHA" -o "$torrent" "$dist/$asset"
+            info=$(aria2c -S "$torrent")
+            printf '%s\n' "$info"
+            size=$(wc -c < "$dist/$asset" | tr -d ' ')
+            grep -qxF "  1|./$asset" <<< "$info" ||
+              { echo "::error::$asset.torrent does not list the file $asset"; exit 1; }
+            grep '^Total Length: ' <<< "$info" | tr -d ',' | grep -qF "($size)" ||
+              { echo "::error::$asset.torrent does not have the size of $asset ($size bytes)"; exit 1; }
+            grep -qxF " $base/$asset" <<< "$info" ||
+              { echo "::error::$asset.torrent has no web seed for $base/$asset"; exit 1; }
+          done
+
+          # The magnet link in the release notes is for the bundle under its stable name.
+          asset=millennium-darwin-arm64.tar.gz
+          hash=$(aria2c -S "$dist/${asset}.torrent" | sed -n 's/^Info Hash: //p')
+          [[ "$hash" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no info hash for $asset.torrent"; exit 1; }
+          magnet="magnet:?xt=urn:btih:${hash}&dn=${asset}"
+          for t in "${trackers[@]}"; do magnet+="&tr=$(jq -rn --arg v "$t" '$v | @uri')"; done
+          magnet+="&ws=$(jq -rn --arg v "$base/$asset" '$v | @uri')"
+          echo "magnet=${magnet}" >> "$GITHUB_OUTPUT"
+
       - name: Publish the release
         if: github.ref_name == github.event.repository.default_branch
         shell: bash
@@ -146,6 +192,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           NAME: ${{ steps.bundle.outputs.name }}
+          MAGNET: ${{ steps.torrents.outputs.magnet }}
         run: |
           dist="${RUNNER_TEMP}/dist"
           cat > notes.md <<EOF
@@ -186,8 +233,26 @@ jobs:
           Then run the install command it prints.
 
           With either method, the wrapper app comes with MILLENNIUM_EXTRA_INSERT_LIBRARIES already set.
+
+          **Download with BitTorrent**
+
+          The asset \`millennium-darwin-arm64.tar.gz.torrent\` downloads the bundle. It uses GitHub as a web seed, so it works with no peers:
+
+          \`\`\`sh
+          aria2c --seed-time=0 https://github.com/${GH_REPO}/releases/download/latest-build/millennium-darwin-arm64.tar.gz.torrent
+          \`\`\`
+
+          This only downloads the bundle; it doesn't install it. A torrent matches only the build it was made for, so get the new one after an update. The other downloads in this release have .torrent files too.
+
+          Magnet link for the same bundle. It doesn't include the torrent's file details, so your client needs at least one peer to send them. If there may be no peers, use the .torrent file.
+
+          \`\`\`text
+          ${MAGNET}
+          \`\`\`
           EOF
           gh release delete latest-build --cleanup-tag --yes > /dev/null 2>&1 || true
           gh release create latest-build \
             "$dist/${NAME}.tar.gz" "$dist/${NAME}.tar.gz.sha256" "$dist/millennium-darwin-arm64.tar.gz" \
+            "$dist/${NAME}.tar.gz.torrent" "$dist/${NAME}.tar.gz.sha256.torrent" \
+            "$dist/millennium-darwin-arm64.tar.gz.torrent" \
             --target "$GITHUB_SHA" --title "Build of ${NAME}" --notes-file notes.md
