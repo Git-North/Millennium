@@ -151,6 +151,7 @@ jobs:
         run: |
           command -v mktorrent > /dev/null || brew install mktorrent
           command -v aria2c > /dev/null || brew install aria2
+          command -v jq > /dev/null || brew install jq
           dist="${RUNNER_TEMP}/dist"
           base="https://github.com/${GH_REPO}/releases/download/latest-build"
           trackers=(
