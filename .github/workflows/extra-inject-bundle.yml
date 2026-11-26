@@ -15,8 +15,10 @@ on:
     branches: ["**"]
   workflow_dispatch:
 
+# One group per branch: a newer run replaces an older one on the same branch only. With one group for all branches, a
+# push to any other branch cancelled a running release build, even though that push's own job was skipped.
 concurrency:
-  group: extra-inject-bundle
+  group: extra-inject-bundle-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
