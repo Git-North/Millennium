@@ -1,0 +1,193 @@
+name: SonarQube
+
+# Static analysis of the fork with SonarQube: C++/Objective-C++ (through the compilation database of the macOS build),
+# TypeScript, Lua and Rust. Settings that do not depend on the server are in sonar-project.properties.
+#
+# - Pushes to the default branch (lbk-macos) update the branch analysis.
+# - Pull requests are analyzed as pull requests, and the job fails when the quality gate fails, so the PR shows a red
+#   "SonarQube / analysis" check. Make that check required in the branch rules to block merging on it.
+#
+# Authentication
+# - SonarQube Cloud (the default, free for public repositories) uses secretless analysis: the job gets a GitHub OIDC
+#   identity token, and SonarSource/sonarqube-auth-action exchanges it for a project-scoped SonarQube token that expires
+#   after 30 minutes. No SONAR_TOKEN secret is stored. Setup, once: the repository is bound to a SonarQube Cloud project
+#   (import it through GitHub), Automatic Analysis is off for that project (Administration > Analysis Method), and an
+#   organization admin has turned on Administration > Organization settings > Analysis > "Enable secretless analysis for
+#   GitHub Actions". The organization and project key come from that binding.
+#   GitHub gives pull requests from forks no OIDC token, so the job fails for those (see below).
+# - A self-hosted SonarQube Server has no OIDC exchange. Set the repository variable SONAR_HOST_URL to its URL, and the
+#   repository secret SONAR_TOKEN to a token with Execute Analysis permission; SONAR_PROJECT_KEY optionally overrides
+#   the project key (Git-North_Millennium). Without SONAR_TOKEN the job fails with an error.
+# - SONAR_RUNNER (repository variable, optional) sets the runner labels as JSON, e.g. ["self-hosted","macOS","ARM64"];
+#   unset means macos-15. It applies to pushes and manual runs only: pull requests always use GitHub's macos-15 runner,
+#   so PR-controlled build code never runs on a persistent self-hosted machine.
+# - When the analysis cannot run (a fork PR in Cloud mode, or Server mode without SONAR_TOKEN) the job fails instead of
+#   passing, so a required check never turns green without a quality-gate result.
+
+on:
+  push:
+    branches: [lbk-macos]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: sonarqube-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  # For the GitHub OIDC token that secretless analysis exchanges for a SonarQube Cloud token.
+  id-token: write
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+jobs:
+  analysis:
+    # Same runner as the bundle workflow: Xcode on macos-14 ships a libc++ too old for this tree.
+    runs-on: ${{ fromJSON(github.event_name != 'pull_request' && vars.SONAR_RUNNER || '"macos-15"') }}
+    timeout-minutes: 90
+    steps:
+      - name: Choose SonarQube Cloud or Server
+        id: mode
+        shell: bash
+        env:
+          SERVER_URL: ${{ vars.SONAR_HOST_URL }}
+          HAS_SERVER_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+          # Not head.repo.fork: that is true for every PR here, because this repository is itself a fork.
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          run=true
+          if [ -z "$SERVER_URL" ]; then
+            mode=cloud
+            if [ "$FORK_PR" = "true" ]; then
+              echo "::error::Pull requests from forks get no OIDC token, so secretless SonarQube Cloud analysis cannot run. Review the PR manually."
+              run=false
+            fi
+          else
+            mode=server
+            if [ "$HAS_SERVER_TOKEN" != "true" ]; then
+              echo "::error::SONAR_HOST_URL is set but the SONAR_TOKEN secret is not available (not set, or a pull request from a fork), so the analysis cannot run."
+              run=false
+            fi
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "SonarQube $mode, analysis runs: $run"
+          # Fail rather than pass without a quality-gate result.
+          [ "$run" = "true" ] || exit 1
+
+      - name: Checkout
+        if: steps.mode.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history, so new-code detection and blame work.
+          fetch-depth: 0
+
+      # Same settings as upstream's release workflow and the bundle workflow.
+      - name: Read upstream's build settings
+        if: steps.mode.outputs.run == 'true'
+        id: settings
+        shell: bash
+        run: |
+          wf=.github/workflows/lbk-macos-release.yml
+          target=$(sed -n 's/^  MACOSX_DEPLOYMENT_TARGET: "\(.*\)"/\1/p' "$wf" | head -n 1)
+          openssl=$(sed -n 's/^  OPENSSL_VERSION: "\(.*\)"/\1/p' "$wf" | head -n 1)
+          [ -n "$target" ] || { echo "::warning::MACOSX_DEPLOYMENT_TARGET not found in $wf; using 13.3"; target=13.3; }
+          [ -n "$openssl" ] || { echo "::warning::OPENSSL_VERSION not found in $wf; using 3.5.9"; openssl=3.5.9; }
+          echo "MACOSX_DEPLOYMENT_TARGET=$target" >> "$GITHUB_ENV"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "openssl=$openssl" >> "$GITHUB_OUTPUT"
+
+      - name: Select Xcode
+        if: steps.mode.outputs.run == 'true' && runner.environment == 'github-hosted'
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup Bun
+        if: steps.mode.outputs.run == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Setup Rust
+        if: steps.mode.outputs.run == 'true'
+        run: |
+          command -v rustup > /dev/null || { echo "::error::rustup is not installed on this runner (brew install rustup)"; exit 1; }
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Install build tools
+        if: steps.mode.outputs.run == 'true'
+        run: |
+          brew install ninja cmake || true
+          cmake --version
+
+      - name: Cache OpenSSL
+        if: steps.mode.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: build/lbk-deps/arm64
+          key: lbk-openssl-${{ steps.settings.outputs.openssl }}-arm64-${{ steps.settings.outputs.target }}-macos-15-v1
+
+      # The C/C++ analyzer reads build/osx-release/compile_commands.json. The osx-release preset does not set
+      # CMAKE_EXPORT_COMPILE_COMMANDS, so it is turned on through CMake's environment variable of the same name.
+      # A full build (not just configure) also produces the generated headers that the sources include.
+      - name: Build
+        if: steps.mode.outputs.run == 'true'
+        env:
+          CMAKE_EXPORT_COMPILE_COMMANDS: "ON"
+        run: |
+          bash scripts/macos/lbk/build.sh arm64
+          db=build/osx-release/compile_commands.json
+          [ -s "$db" ] || { echo "::error::$db was not written"; exit 1; }
+          echo "$(grep -c '"file"' "$db") compile commands in $db"
+
+      # Pull requests wait for the quality gate, and the scan step fails when the gate fails.
+      - name: Quality gate arguments
+        if: steps.mode.outputs.run == 'true'
+        id: gate
+        shell: bash
+        env:
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          if [ "$IS_PR" = "true" ]; then
+            echo "args=-Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=600" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Right before the scan, because the token it exports as SONAR_TOKEN lasts 30 minutes and the build above can be long.
+      - name: SonarQube Cloud authentication (OIDC)
+        if: steps.mode.outputs.run == 'true' && steps.mode.outputs.mode == 'cloud'
+        id: auth
+        uses: SonarSource/sonarqube-auth-action@b372e2c2930aadfcc4f4399446da1e12772709ad # v1.2
+
+      - name: SonarQube Cloud scan
+        if: steps.mode.outputs.run == 'true' && steps.mode.outputs.mode == 'cloud'
+        uses: SonarSource/sonarqube-scan-action@70bad232163b09d998ea0707ee80c0ec80798c16 # v8.5.1
+        env:
+          # The auth action also exports it to the environment; passing the output keeps the dependency explicit.
+          SONAR_TOKEN: ${{ steps.auth.outputs.sonar-token }}
+        with:
+          args: >
+            -Dsonar.organization=${{ steps.auth.outputs.organization }}
+            -Dsonar.projectKey=${{ steps.auth.outputs.project-key }}
+            ${{ steps.gate.outputs.args }}
+
+      - name: SonarQube Server scan
+        if: steps.mode.outputs.run == 'true' && steps.mode.outputs.mode == 'server'
+        uses: SonarSource/sonarqube-scan-action@70bad232163b09d998ea0707ee80c0ec80798c16 # v8.5.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY || 'Git-North_Millennium' }}
+            ${{ steps.gate.outputs.args }}
