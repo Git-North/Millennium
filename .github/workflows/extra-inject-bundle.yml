@@ -151,11 +151,41 @@ jobs:
           cat > notes.md <<EOF
           Complete macOS build of Millennium (Apple Silicon) from commit ${GITHUB_SHA}, with MILLENNIUM_EXTRA_INSERT_LIBRARIES support. It is upstream's own build, ad-hoc signed.
 
-          Quit Steam, then on your Mac:
+          **Install with Homebrew (recommended)**
 
-              sh ${KIT}/millennium-extra-inject.sh fetch ${GH_REPO}
+          Quit Steam before installing, upgrading or uninstalling.
 
-          and run the install command it prints. The wrapper app comes with MILLENNIUM_EXTRA_INSERT_LIBRARIES already set.
+          \`\`\`sh
+          brew tap git-north/millennium https://github.com/Git-North/Millennium
+          brew trust git-north/millennium
+          brew install --cask git-north/millennium/millennium
+          \`\`\`
+
+          Update:
+
+          \`\`\`sh
+          brew upgrade --cask --greedy git-north/millennium/millennium
+          \`\`\`
+
+          Uninstall (keeps plugins and config):
+
+          \`\`\`sh
+          brew uninstall --cask git-north/millennium/millennium
+          \`\`\`
+
+          Add \`--zap\` to also move \`~/Library/Application Support/Millennium\`, which holds them, to the Trash.
+
+          **Manual install**
+
+          As an alternative to Homebrew, use the repository's script. This needs a clone of the repository, because the script path is relative to one, and aria2c (\`brew install aria2\`). Quit Steam, then run this from the root of the clone:
+
+          \`\`\`sh
+          sh ${KIT}/millennium-extra-inject.sh fetch ${GH_REPO}
+          \`\`\`
+
+          Then run the install command it prints.
+
+          With either method, the wrapper app comes with MILLENNIUM_EXTRA_INSERT_LIBRARIES already set.
           EOF
           gh release delete latest-build --cleanup-tag --yes > /dev/null 2>&1 || true
           gh release create latest-build \
